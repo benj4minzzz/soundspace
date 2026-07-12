@@ -128,6 +128,8 @@ class GameEngine {
     this.lobbyCode = null;
     this.multiplayerInterval = null;
     this.oppFinished = false;
+    this.pc = null;
+    this.dataChannel = null;
 
     this.clickBuffers = { creamy: null, clacky: null, custom: null };
     this.initEventListeners();
@@ -1738,16 +1740,39 @@ class GameEngine {
     
     document.getElementById('host-code-val').innerText = code;
     document.getElementById('host-status-container').classList.remove('hidden');
-    document.getElementById('host-status-text').innerText = "Connecting to matchmaking...";
+    document.getElementById('host-status-text').innerText = "Generating connection offer...";
     document.getElementById('start-multi-btn').classList.add('hidden');
 
-    if (this.peer) this.peer.destroy();
-    this.peer = new Peer(`soundspace-${code}`);
-    
-    this.peer.on('open', async (id) => {
-      console.log('Hosted peer ID is: ' + id);
-      document.getElementById('host-status-text').innerText = "Lobby open. Waiting for opponent...";
-      
+    try {
+      this.pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      });
+
+      this.dataChannel = this.pc.createDataChannel("soundspace_sync", { ordered: true });
+      this.setupDataChannel(this.dataChannel);
+
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+
+      document.getElementById('host-status-text').innerText = "Gathering network routes...";
+      await new Promise((resolve) => {
+        if (this.pc.iceGatheringState === 'complete') {
+          resolve();
+        } else {
+          this.pc.onicecandidate = (e) => {
+            if (!e.candidate) resolve();
+          };
+        }
+      });
+
+      await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, {
+        method: 'POST',
+        body: JSON.stringify(this.pc.localDescription)
+      });
+
       const songUrl = document.getElementById('yt-url-input').value;
       const difficulty = document.getElementById('difficulty-input').value;
       const gridSize = parseInt(document.getElementById('grid-size-select').value);
@@ -1771,26 +1796,34 @@ class GameEngine {
       const updated = currentLobbies.filter(l => l.code !== code);
       updated.push(newLobby);
       await this.saveActiveLobbies(updated);
-    });
-    
-    this.peer.on('connection', (conn) => {
-      this.peerConn = conn;
-      this.setupPeerConnection();
-      document.getElementById('host-status-text').innerText = "Opponent joined! Ready to start.";
-      document.getElementById('start-multi-btn').classList.remove('hidden');
-      
-      // Update status in directory list to full
-      this.updatePublicLobbyStatus("ready");
-    });
-    
-    this.peer.on('error', (err) => {
+
+      document.getElementById('host-status-text').innerText = "Lobby open. Waiting for opponent...";
+
+      if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
+      this.multiplayerInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/answer_${code}`);
+          if (!res.ok) return;
+          const text = await res.text();
+          if (!text) return;
+          
+          clearInterval(this.multiplayerInterval);
+          this.multiplayerInterval = null;
+
+          const answer = JSON.parse(text);
+          await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+          
+          fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, { method: 'DELETE' }).catch(()=>{});
+          fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/answer_${code}`, { method: 'DELETE' }).catch(()=>{});
+        } catch (e) {
+          console.error("Error polling for answer:", e);
+        }
+      }, 1000);
+
+    } catch (err) {
       console.error(err);
-      if (err.type === 'unavailable-id') {
-        this.hostLobby();
-      } else {
-        document.getElementById('host-status-text').innerText = "Connection error!";
-      }
-    });
+      document.getElementById('host-status-text').innerText = "Failed to host match.";
+    }
   }
 
   async updatePublicLobbyStatus(status) {
@@ -1820,39 +1853,73 @@ class GameEngine {
       joinBtn.disabled = true;
     }
 
-    if (this.peer) this.peer.destroy();
-    this.peer = new Peer();
-    
-    this.peer.on('open', (id) => {
-      const conn = this.peer.connect(`soundspace-${code}`);
-      this.peerConn = conn;
-      this.setupPeerConnection();
-    });
-    
-    this.peer.on('error', (err) => {
+    try {
+      const res = await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`);
+      if (!res.ok) throw new Error("Lobby not found");
+      const text = await res.text();
+      if (!text) throw new Error("Empty lobby data");
+      const offer = JSON.parse(text);
+
+      this.pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      });
+
+      this.pc.ondatachannel = (e) => {
+        this.dataChannel = e.channel;
+        this.setupDataChannel(this.dataChannel);
+      };
+
+      await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+      const answer = await this.pc.createAnswer();
+      await this.pc.setLocalDescription(answer);
+
+      await new Promise((resolve) => {
+        if (this.pc.iceGatheringState === 'complete') {
+          resolve();
+        } else {
+          this.pc.onicecandidate = (e) => {
+            if (!e.candidate) resolve();
+          };
+        }
+      });
+
+      await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/answer_${code}`, {
+        method: 'POST',
+        body: JSON.stringify(this.pc.localDescription)
+      });
+
+    } catch (err) {
       console.error(err);
-      alert("Lobby not found or failed to connect.");
+      alert("Failed to join lobby: " + err.message);
       if (joinBtn) {
         joinBtn.innerText = "Join Lobby";
         joinBtn.disabled = false;
       }
-    });
+    }
   }
 
-  setupPeerConnection() {
-    this.peerConn.on('open', () => {
-      console.log("WebRTC peer connection successfully opened.");
-      
+  setupDataChannel(channel) {
+    channel.onopen = () => {
+      console.log("Data channel successfully opened.");
       if (this.multiplayerRole === 'guest') {
         const joinBtn = document.getElementById('join-lobby-btn');
         if (joinBtn) {
           joinBtn.innerText = `LOBBY JOINED (${this.lobbyCode})`;
           joinBtn.disabled = true;
         }
+      } else {
+        document.getElementById('host-status-text').innerText = "Opponent joined! Ready to start.";
+        document.getElementById('start-multi-btn').classList.remove('hidden');
+        this.updatePublicLobbyStatus("ready");
       }
-    });
-    
-    this.peerConn.on('data', (data) => {
+    };
+
+    channel.onmessage = (e) => {
+      const data = JSON.parse(e.data);
       if (data.type === 'start') {
         document.getElementById('yt-url-input').value = data.settings.songUrl;
         document.getElementById('difficulty-input').value = data.settings.difficulty;
@@ -1879,11 +1946,15 @@ class GameEngine {
         
         this.evaluateMultiplayerWinner();
       }
-    });
+    };
+
+    channel.onclose = () => {
+      console.log("Data channel closed.");
+    };
   }
 
   async startMultiMatch() {
-    if (!this.peerConn) return;
+    if (!this.dataChannel || this.dataChannel.readyState !== 'open') return;
     
     const settings = {
       songUrl: document.getElementById('yt-url-input').value,
@@ -1892,14 +1963,12 @@ class GameEngine {
       ar: parseInt(document.getElementById('approach-rate-input').value)
     };
     
-    this.peerConn.send({
+    this.dataChannel.send(JSON.stringify({
       type: 'start',
       settings
-    });
+    }));
     
-    // Remove lobby from public list so others don't see it anymore
     await this.removeLobbyFromPublic(this.lobbyCode);
-    
     this.handleLoadAndStart();
   }
 
@@ -1910,7 +1979,6 @@ class GameEngine {
     const vsPanel = document.getElementById('multiplayer-vs-panel');
     if (vsPanel) vsPanel.classList.remove('hidden');
     
-    // Set initial values
     const myVsScore = document.getElementById('vs-my-score');
     const myVsAcc = document.getElementById('vs-my-acc');
     const oppVsScore = document.getElementById('vs-opp-score');
@@ -1928,12 +1996,12 @@ class GameEngine {
       if (myVsScore) myVsScore.innerText = this.score.toLocaleString('en-US');
       if (myVsAcc) myVsAcc.innerText = this.accDisplay.innerText;
       
-      if (this.peerConn && this.peerConn.open) {
-        this.peerConn.send({
+      if (this.dataChannel && this.dataChannel.readyState === 'open') {
+        this.dataChannel.send(JSON.stringify({
           type: 'update',
           score: this.score,
           acc: this.accDisplay.innerText
-        });
+        }));
       }
     }, 200);
   }
@@ -1947,8 +2015,8 @@ class GameEngine {
       acc: this.accDisplay.innerText
     };
     
-    if (this.peerConn && this.peerConn.open) {
-      this.peerConn.send(finalData);
+    if (this.dataChannel && this.dataChannel.readyState === 'open') {
+      this.dataChannel.send(JSON.stringify(finalData));
     }
     
     const myFinScore = document.getElementById('my-final-score');
@@ -1990,13 +2058,13 @@ class GameEngine {
     if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
     this.multiplayerInterval = null;
     
-    if (this.peerConn) {
-      try { this.peerConn.close(); } catch(e) {}
-      this.peerConn = null;
+    if (this.dataChannel) {
+      try { this.dataChannel.close(); } catch(e) {}
+      this.dataChannel = null;
     }
-    if (this.peer) {
-      try { this.peer.destroy(); } catch(e) {}
-      this.peer = null;
+    if (this.pc) {
+      try { this.pc.close(); } catch(e) {}
+      this.pc = null;
     }
     
     if (this.lobbyCode && this.multiplayerRole === 'host') {

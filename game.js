@@ -1674,29 +1674,44 @@ class GameEngine {
 
   async getActiveLobbies() {
     try {
-      const res = await fetch('https://kvdb.io/ss_rhythm_lobbies_v1/active_lobbies');
+      const res = await fetch('https://ntfy.sh/soundspace-lobbies-directory-v1/json?poll=1');
       if (!res.ok) return [];
       const text = await res.text();
-      if (!text) return [];
-      const data = JSON.parse(text);
+      const lines = text.split('\n').filter(Boolean);
       
-      // Filter out stale lobbies (older than 10 minutes)
+      const roomsMap = {};
+      
+      for (const line of lines) {
+        try {
+          const raw = JSON.parse(line);
+          if (raw.event === 'message') {
+            const payload = JSON.parse(raw.message);
+            if (payload.type === 'open') {
+              roomsMap[payload.code] = payload;
+            } else if (payload.type === 'close') {
+              delete roomsMap[payload.code];
+            }
+          }
+        } catch(e) {}
+      }
+      
       const now = Date.now();
-      return data.filter(room => (now - room.timestamp) < 600000);
+      // Filter out lobbies older than 10 minutes
+      return Object.values(roomsMap).filter(room => (now - room.timestamp) < 600000);
     } catch (e) {
       console.warn("Lobbies directory fetch error:", e);
       return [];
     }
   }
 
-  async saveActiveLobbies(lobbies) {
+  async publishLobbyEvent(event) {
     try {
-      await fetch('https://kvdb.io/ss_rhythm_lobbies_v1/active_lobbies', {
+      await fetch('https://ntfy.sh/soundspace-lobbies-directory-v1', {
         method: 'POST',
-        body: JSON.stringify(lobbies)
+        body: JSON.stringify(event)
       });
     } catch (e) {
-      console.warn("Lobbies directory save error:", e);
+      console.warn("Lobby publish event error:", e);
     }
   }
 
@@ -1715,7 +1730,7 @@ class GameEngine {
         <div class="challenge-card" style="margin-bottom: 8px;">
           <div class="challenge-info">
             <span class="challenge-name">${lobby.songArtist} - ${lobby.songTitle}</span>
-            <span class="challenge-artist">Lobby Code: ${lobby.code} (${lobby.status})</span>
+            <span class="challenge-artist">Lobby Code: ${lobby.code} (${lobby.status || 'waiting'})</span>
           </div>
           <button class="action-btn neon-btn join-room-card-btn" data-code="${lobby.code}" style="padding: 5px 12px; font-size: 12px;">JOIN</button>
         </div>
@@ -1784,9 +1799,14 @@ class GameEngine {
         };
       });
 
-      await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, {
+      // Upload Offer to ntfy.sh (explicit destructuring to prevent empty stringify output in some browsers)
+      const offerPayload = {
+        type: this.pc.localDescription.type,
+        sdp: this.pc.localDescription.sdp
+      };
+      await fetch(`https://ntfy.sh/soundspace-offer-${code}`, {
         method: 'POST',
-        body: JSON.stringify(this.pc.localDescription)
+        body: JSON.stringify(offerPayload)
       });
 
       const songUrl = document.getElementById('yt-url-input').value;
@@ -1797,6 +1817,7 @@ class GameEngine {
       const activeAuthor = this.audioController.activeAuthor || "Unknown Artist";
       
       const newLobby = {
+        type: 'open',
         code,
         songTitle: activeTitle,
         songArtist: activeAuthor,
@@ -1808,29 +1829,23 @@ class GameEngine {
         timestamp: Date.now()
       };
       
-      const currentLobbies = await this.getActiveLobbies();
-      const updated = currentLobbies.filter(l => l.code !== code);
-      updated.push(newLobby);
-      await this.saveActiveLobbies(updated);
+      await this.publishLobbyEvent(newLobby);
 
       document.getElementById('host-status-text').innerText = "Lobby open. Waiting for opponent...";
 
       if (this.eventSource) this.eventSource.close();
-      this.eventSource = new EventSource(`https://ntfy.sh/soundspace-lobby-${code}/sse`);
+      this.eventSource = new EventSource(`https://ntfy.sh/soundspace-answer-${code}/sse`);
       
       this.eventSource.onmessage = async (e) => {
         try {
           const msg = JSON.parse(e.data);
           if (msg.event === 'message') {
-            const payload = JSON.parse(msg.message);
-            if (payload.type === 'answer') {
-              console.log("Received answer description via ntfy.sh SSE.");
-              this.eventSource.close();
-              this.eventSource = null;
-              
-              await this.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-              fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, { method: 'DELETE' }).catch(()=>{});
-            }
+            const answer = JSON.parse(msg.message);
+            console.log("Received answer description via ntfy.sh SSE.");
+            this.eventSource.close();
+            this.eventSource = null;
+            
+            await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
           }
         } catch(err) {
           console.error("SSE parse error:", err);
@@ -1843,16 +1858,7 @@ class GameEngine {
     }
   }
 
-  async updatePublicLobbyStatus(status) {
-    try {
-      const lobbies = await this.getActiveLobbies();
-      const lobby = lobbies.find(l => l.code === this.lobbyCode);
-      if (lobby) {
-        lobby.status = status;
-        await this.saveActiveLobbies(lobbies);
-      }
-    } catch(e) {}
-  }
+
 
   async joinLobby(code) {
     if (!code) {
@@ -1871,11 +1877,21 @@ class GameEngine {
     }
 
     try {
-      const res = await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`);
+      const res = await fetch(`https://ntfy.sh/soundspace-offer-${code}/json?poll=1`);
       if (!res.ok) throw new Error("Lobby not found");
       const text = await res.text();
-      if (!text) throw new Error("Empty lobby data");
-      const offer = JSON.parse(text);
+      const lines = text.split('\n').filter(Boolean);
+      let offer = null;
+      for (const line of lines) {
+        try {
+          const raw = JSON.parse(line);
+          if (raw.event === 'message') {
+            offer = JSON.parse(raw.message);
+          }
+        } catch(e) {}
+      }
+      
+      if (!offer) throw new Error("Connection parameters not found on server");
 
       this.pc = new RTCPeerConnection({
         iceServers: [
@@ -1919,12 +1935,13 @@ class GameEngine {
         };
       });
 
-      await fetch(`https://ntfy.sh/soundspace-lobby-${code}`, {
+      const answerPayload = {
+        type: this.pc.localDescription.type,
+        sdp: this.pc.localDescription.sdp
+      };
+      await fetch(`https://ntfy.sh/soundspace-answer-${code}`, {
         method: 'POST',
-        body: JSON.stringify({
-          type: 'answer',
-          sdp: this.pc.localDescription
-        })
+        body: JSON.stringify(answerPayload)
       });
 
     } catch (err) {
@@ -1949,7 +1966,9 @@ class GameEngine {
       } else {
         document.getElementById('host-status-text').innerText = "Opponent joined! Ready to start.";
         document.getElementById('start-multi-btn').classList.remove('hidden');
-        this.updatePublicLobbyStatus("ready");
+        
+        // Notify directory that room is active
+        this.publishLobbyEvent({ type: 'close', code: this.lobbyCode });
       }
     };
 
@@ -2003,7 +2022,7 @@ class GameEngine {
       settings
     }));
     
-    await this.removeLobbyFromPublic(this.lobbyCode);
+    await this.publishLobbyEvent({ type: 'close', code: this.lobbyCode });
     this.handleLoadAndStart();
   }
 
@@ -2107,7 +2126,7 @@ class GameEngine {
     }
     
     if (this.lobbyCode && this.multiplayerRole === 'host') {
-      this.removeLobbyFromPublic(this.lobbyCode);
+      this.publishLobbyEvent({ type: 'close', code: this.lobbyCode });
     }
     
     this.isMultiplayer = false;
@@ -2121,14 +2140,6 @@ class GameEngine {
       joinBtn.innerText = "Join Lobby";
       joinBtn.disabled = false;
     }
-  }
-  
-  async removeLobbyFromPublic(code) {
-    try {
-      const lobbies = await this.getActiveLobbies();
-      const updated = lobbies.filter(l => l.code !== code);
-      await this.saveActiveLobbies(updated);
-    } catch(e) {}
   }
 }
 

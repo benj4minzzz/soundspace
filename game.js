@@ -686,19 +686,7 @@ class GameEngine {
     const lyricsDiv = document.getElementById('lyrics-display');
     if (lyricsDiv) lyricsDiv.classList.add('hidden');
     
-    if (this.multiplayerInterval) {
-      clearInterval(this.multiplayerInterval);
-      this.multiplayerInterval = null;
-    }
-    this.isMultiplayer = false;
-    this.lobbyCode = null;
-    this.multiplayerRole = null;
-    
-    const joinBtn = document.getElementById('join-lobby-btn');
-    if (joinBtn) {
-      joinBtn.innerText = "Join Lobby";
-      joinBtn.disabled = false;
-    }
+    this.cleanUpMultiplayer();
 
     this.audioController.stop();
     this.gameState = 'menu';
@@ -723,7 +711,6 @@ class GameEngine {
     const multiPanel = document.getElementById('multiplayer-result-panel');
     if (this.isMultiplayer) {
       if (multiPanel) multiPanel.classList.remove('hidden');
-      if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
       this.sendFinalMultiStats();
     } else {
       if (multiPanel) multiPanel.classList.add('hidden');
@@ -1682,11 +1669,37 @@ class GameEngine {
     }, 1800);
   }
 
+  async getActiveLobbies() {
+    try {
+      const res = await fetch('https://kvdb.io/ss_rhythm_lobbies_v1/active_lobbies');
+      if (!res.ok) return [];
+      const text = await res.text();
+      if (!text) return [];
+      const data = JSON.parse(text);
+      
+      // Filter out stale lobbies (older than 10 minutes)
+      const now = Date.now();
+      return data.filter(room => (now - room.timestamp) < 600000);
+    } catch (e) {
+      console.warn("Lobbies directory fetch error:", e);
+      return [];
+    }
+  }
+
+  async saveActiveLobbies(lobbies) {
+    try {
+      await fetch('https://kvdb.io/ss_rhythm_lobbies_v1/active_lobbies', {
+        method: 'POST',
+        body: JSON.stringify(lobbies)
+      });
+    } catch (e) {
+      console.warn("Lobbies directory save error:", e);
+    }
+  }
+
   async refreshLobbiesList() {
     try {
-      const res = await fetch('/api/lobby/list');
-      if (!res.ok) return;
-      const lobbies = await res.json();
+      const lobbies = await this.getActiveLobbies();
       const list = document.getElementById('lobbies-list');
       if (!list) return;
       
@@ -1713,50 +1726,82 @@ class GameEngine {
         });
       });
     } catch (err) {
-      console.error("Error fetching lobbies:", err);
+      console.error("Error refreshing lobbies:", err);
     }
   }
 
   async hostLobby() {
-    const songUrl = document.getElementById('yt-url-input').value;
-    const difficulty = document.getElementById('difficulty-input').value;
-    const gridSize = parseInt(document.getElementById('grid-size-select').value);
-    const ar = parseInt(document.getElementById('approach-rate-input').value);
+    const code = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit code
+    this.lobbyCode = code;
+    this.isMultiplayer = true;
+    this.multiplayerRole = 'host';
     
-    const activeTitle = this.audioController.activeTitle || "YouTube Song";
-    const activeAuthor = this.audioController.activeAuthor || "Unknown Artist";
+    document.getElementById('host-code-val').innerText = code;
+    document.getElementById('host-status-container').classList.remove('hidden');
+    document.getElementById('host-status-text').innerText = "Connecting to matchmaking...";
+    document.getElementById('start-multi-btn').classList.add('hidden');
+
+    if (this.peer) this.peer.destroy();
+    this.peer = new Peer(`soundspace-${code}`);
     
-    const payload = {
-      songUrl,
-      songTitle: activeTitle,
-      songArtist: activeAuthor,
-      difficulty,
-      gridSize,
-      ar
-    };
+    this.peer.on('open', async (id) => {
+      console.log('Hosted peer ID is: ' + id);
+      document.getElementById('host-status-text').innerText = "Lobby open. Waiting for opponent...";
+      
+      const songUrl = document.getElementById('yt-url-input').value;
+      const difficulty = document.getElementById('difficulty-input').value;
+      const gridSize = parseInt(document.getElementById('grid-size-select').value);
+      const ar = parseInt(document.getElementById('approach-rate-input').value);
+      const activeTitle = this.audioController.activeTitle || "YouTube Song";
+      const activeAuthor = this.audioController.activeAuthor || "Unknown Artist";
+      
+      const newLobby = {
+        code,
+        songTitle: activeTitle,
+        songArtist: activeAuthor,
+        difficulty,
+        gridSize,
+        ar,
+        songUrl,
+        status: "waiting",
+        timestamp: Date.now()
+      };
+      
+      const currentLobbies = await this.getActiveLobbies();
+      const updated = currentLobbies.filter(l => l.code !== code);
+      updated.push(newLobby);
+      await this.saveActiveLobbies(updated);
+    });
     
+    this.peer.on('connection', (conn) => {
+      this.peerConn = conn;
+      this.setupPeerConnection();
+      document.getElementById('host-status-text').innerText = "Opponent joined! Ready to start.";
+      document.getElementById('start-multi-btn').classList.remove('hidden');
+      
+      // Update status in directory list to full
+      this.updatePublicLobbyStatus("ready");
+    });
+    
+    this.peer.on('error', (err) => {
+      console.error(err);
+      if (err.type === 'unavailable-id') {
+        this.hostLobby();
+      } else {
+        document.getElementById('host-status-text').innerText = "Connection error!";
+      }
+    });
+  }
+
+  async updatePublicLobbyStatus(status) {
     try {
-      const res = await fetch('/api/lobby/host', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) throw new Error("Failed to host lobby");
-      
-      const room = await res.json();
-      this.isMultiplayer = true;
-      this.multiplayerRole = 'host';
-      this.lobbyCode = room.code;
-      
-      document.getElementById('host-code-val').innerText = room.code;
-      document.getElementById('host-status-container').classList.remove('hidden');
-      document.getElementById('host-status-text').innerText = "Waiting for opponent...";
-      document.getElementById('start-multi-btn').classList.add('hidden');
-      
-      this.startOpponentPoll();
-    } catch(err) {
-      alert(err.message);
-    }
+      const lobbies = await this.getActiveLobbies();
+      const lobby = lobbies.find(l => l.code === this.lobbyCode);
+      if (lobby) {
+        lobby.status = status;
+        await this.saveActiveLobbies(lobbies);
+      }
+    } catch(e) {}
   }
 
   async joinLobby(code) {
@@ -1765,202 +1810,218 @@ class GameEngine {
       return;
     }
     
-    try {
-      const res = await fetch('/api/lobby/join', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code })
-      });
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Failed to join lobby");
-      }
-      
-      const lobby = await res.json();
-      this.isMultiplayer = true;
-      this.multiplayerRole = 'guest';
-      this.lobbyCode = code;
-      
-      document.getElementById('yt-url-input').value = lobby.settings.songUrl;
-      document.getElementById('difficulty-input').value = lobby.settings.difficulty;
-      document.getElementById('grid-size-select').value = lobby.settings.gridSize;
-      document.getElementById('approach-rate-input').value = lobby.settings.ar;
-      document.getElementById('approach-rate-input').dispatchEvent(new Event('input'));
-      
-      const joinBtn = document.getElementById('join-lobby-btn');
-      if (joinBtn) {
-        joinBtn.innerText = `LOBBY JOINED (${code})`;
-        joinBtn.disabled = true;
-      }
-      
-      this.startMatchStartPoll();
-    } catch(err) {
-      alert(err.message);
+    this.isMultiplayer = true;
+    this.multiplayerRole = 'guest';
+    this.lobbyCode = code;
+    
+    const joinBtn = document.getElementById('join-lobby-btn');
+    if (joinBtn) {
+      joinBtn.innerText = "Connecting...";
+      joinBtn.disabled = true;
     }
+
+    if (this.peer) this.peer.destroy();
+    this.peer = new Peer();
+    
+    this.peer.on('open', (id) => {
+      const conn = this.peer.connect(`soundspace-${code}`);
+      this.peerConn = conn;
+      this.setupPeerConnection();
+    });
+    
+    this.peer.on('error', (err) => {
+      console.error(err);
+      alert("Lobby not found or failed to connect.");
+      if (joinBtn) {
+        joinBtn.innerText = "Join Lobby";
+        joinBtn.disabled = false;
+      }
+    });
   }
 
-  startOpponentPoll() {
-    if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
-    
-    this.multiplayerInterval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/lobby/status?code=${this.lobbyCode}`);
-        if (!res.ok) return;
-        const room = await res.json();
-        
-        if (room.status === 'ready') {
-          document.getElementById('host-status-text').innerText = "Opponent is ready!";
-          document.getElementById('start-multi-btn').classList.remove('hidden');
+  setupPeerConnection() {
+    this.peerConn.on('open', () => {
+      console.log("WebRTC peer connection successfully opened.");
+      
+      if (this.multiplayerRole === 'guest') {
+        const joinBtn = document.getElementById('join-lobby-btn');
+        if (joinBtn) {
+          joinBtn.innerText = `LOBBY JOINED (${this.lobbyCode})`;
+          joinBtn.disabled = true;
         }
-      } catch(err) {
-        console.error("Opponent poll error:", err);
       }
-    }, 1000);
-  }
-
-  startMatchStartPoll() {
-    if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
+    });
     
-    this.multiplayerInterval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/lobby/status?code=${this.lobbyCode}`);
-        if (!res.ok) return;
-        const room = await res.json();
+    this.peerConn.on('data', (data) => {
+      if (data.type === 'start') {
+        document.getElementById('yt-url-input').value = data.settings.songUrl;
+        document.getElementById('difficulty-input').value = data.settings.difficulty;
+        document.getElementById('grid-size-select').value = data.settings.gridSize;
+        document.getElementById('approach-rate-input').value = data.settings.ar;
+        document.getElementById('approach-rate-input').dispatchEvent(new Event('input'));
         
-        if (room.status === 'playing') {
-          clearInterval(this.multiplayerInterval);
-          this.handleLoadAndStart();
-        }
-      } catch(err) {
-        console.error("Match start poll error:", err);
+        this.handleLoadAndStart();
       }
-    }, 1000);
+      else if (data.type === 'update') {
+        const oppScore = document.getElementById('vs-opp-score');
+        const oppAcc = document.getElementById('vs-opp-acc');
+        if (oppScore) oppScore.innerText = data.score.toLocaleString('en-US');
+        if (oppAcc) oppAcc.innerText = data.acc;
+      }
+      else if (data.type === 'finish') {
+        this.oppFinished = true;
+        this.oppFinalStats = data;
+        
+        const oppFinScore = document.getElementById('opp-final-score');
+        const oppFinAcc = document.getElementById('opp-final-acc');
+        if (oppFinScore) oppFinScore.innerText = data.score.toLocaleString('en-US');
+        if (oppFinAcc) oppFinAcc.innerText = data.acc;
+        
+        this.evaluateMultiplayerWinner();
+      }
+    });
   }
 
   async startMultiMatch() {
-    try {
-      const res = await fetch('/api/lobby/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: this.lobbyCode })
-      });
-      if (!res.ok) throw new Error("Failed to start lobby match");
-      
-      clearInterval(this.multiplayerInterval);
-      this.handleLoadAndStart();
-    } catch(err) {
-      alert(err.message);
-    }
+    if (!this.peerConn) return;
+    
+    const settings = {
+      songUrl: document.getElementById('yt-url-input').value,
+      difficulty: document.getElementById('difficulty-input').value,
+      gridSize: parseInt(document.getElementById('grid-size-select').value),
+      ar: parseInt(document.getElementById('approach-rate-input').value)
+    };
+    
+    this.peerConn.send({
+      type: 'start',
+      settings
+    });
+    
+    // Remove lobby from public list so others don't see it anymore
+    await this.removeLobbyFromPublic(this.lobbyCode);
+    
+    this.handleLoadAndStart();
   }
 
   startMultiplayerGameLoop() {
-    if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
     this.oppFinished = false;
+    this.oppFinalStats = null;
     
     const vsPanel = document.getElementById('multiplayer-vs-panel');
     if (vsPanel) vsPanel.classList.remove('hidden');
     
-    this.multiplayerInterval = setInterval(async () => {
-      if (this.gameState !== 'playing' && this.gameState !== 'finished') return;
+    // Set initial values
+    const myVsScore = document.getElementById('vs-my-score');
+    const myVsAcc = document.getElementById('vs-my-acc');
+    const oppVsScore = document.getElementById('vs-opp-score');
+    const oppVsAcc = document.getElementById('vs-opp-acc');
+    
+    if (myVsScore) myVsScore.innerText = "0";
+    if (myVsAcc) myVsAcc.innerText = "100.00%";
+    if (oppVsScore) oppVsScore.innerText = "0";
+    if (oppVsAcc) oppVsAcc.innerText = "100.00%";
+
+    if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
+    this.multiplayerInterval = setInterval(() => {
+      if (this.gameState !== 'playing') return;
       
-      const hitsCount = this.hitsPerfect + this.hitsGood + this.hitsOkay;
-      const notesRatio = `${hitsCount}/${this.totalNotes || 0}`;
+      if (myVsScore) myVsScore.innerText = this.score.toLocaleString('en-US');
+      if (myVsAcc) myVsAcc.innerText = this.accDisplay.innerText;
       
-      const payload = {
-        code: this.lobbyCode,
-        role: this.multiplayerRole,
-        score: this.score,
-        acc: this.accDisplay.innerText,
-        combo: this.combo,
-        misses: this.misses,
-        notes: notesRatio,
-        finished: this.gameState === 'finished'
-      };
-      
-      try {
-        await fetch('/api/lobby/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+      if (this.peerConn && this.peerConn.open) {
+        this.peerConn.send({
+          type: 'update',
+          score: this.score,
+          acc: this.accDisplay.innerText
         });
-        
-        const res = await fetch(`/api/lobby/status?code=${this.lobbyCode}`);
-        if (!res.ok) return;
-        const room = await res.json();
-        
-        const me = this.multiplayerRole === 'host' ? room.host : room.guest;
-        const opp = this.multiplayerRole === 'host' ? room.guest : room.host;
-        
-        if (opp) {
-          document.getElementById('vs-my-score').innerText = me.score.toLocaleString('en-US');
-          document.getElementById('vs-my-acc').innerText = me.acc;
-          
-          document.getElementById('vs-opp-score').innerText = opp.score.toLocaleString('en-US');
-          document.getElementById('vs-opp-acc').innerText = opp.acc;
-        }
-      } catch(err) {
-        console.error("Multiplayer gameplay loop error:", err);
       }
-    }, 250);
+    }, 200);
   }
 
   async sendFinalMultiStats() {
-    const hitsCount = this.hitsPerfect + this.hitsGood + this.hitsOkay;
-    const notesRatio = `${hitsCount}/${this.totalNotes || 0}`;
+    if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
     
-    const payload = {
-      code: this.lobbyCode,
-      role: this.multiplayerRole,
+    const finalData = {
+      type: 'finish',
       score: this.score,
-      acc: this.accDisplay.innerText,
-      combo: this.combo,
-      misses: this.misses,
-      notes: notesRatio,
-      finished: true
+      acc: this.accDisplay.innerText
     };
     
-    try {
-      await fetch('/api/lobby/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      
-      this.multiplayerInterval = setInterval(async () => {
-        const res = await fetch(`/api/lobby/status?code=${this.lobbyCode}`);
-        if (!res.ok) return;
-        const room = await res.json();
-        
-        const me = this.multiplayerRole === 'host' ? room.host : room.guest;
-        const opp = this.multiplayerRole === 'host' ? room.guest : room.host;
-        
-        if (opp) {
-          document.getElementById('my-final-score').innerText = me.score.toLocaleString('en-US');
-          document.getElementById('opp-final-score').innerText = opp.score.toLocaleString('en-US');
-          document.getElementById('opp-final-acc').innerText = opp.acc;
-          
-          const outcomeEl = document.getElementById('multiplayer-outcome');
-          if (opp.finished) {
-            clearInterval(this.multiplayerInterval);
-            if (me.score > opp.score) {
-              outcomeEl.innerText = "🏆 YOU WON!";
-              outcomeEl.style.color = "#d946ef";
-            } else if (me.score < opp.score) {
-              outcomeEl.innerText = "💀 YOU LOST!";
-              outcomeEl.style.color = "#ff5252";
-            } else {
-              outcomeEl.innerText = "🤝 IT'S A TIE!";
-              outcomeEl.style.color = "#ffffff";
-            }
-          } else {
-            outcomeEl.innerText = "Waiting for Opponent...";
-            outcomeEl.style.color = "#718096";
-          }
-        }
-      }, 500);
-    } catch(err) {
-      console.error("Failed to send final multi stats:", err);
+    if (this.peerConn && this.peerConn.open) {
+      this.peerConn.send(finalData);
     }
+    
+    const myFinScore = document.getElementById('my-final-score');
+    if (myFinScore) myFinScore.innerText = this.score.toLocaleString('en-US');
+    
+    this.evaluateMultiplayerWinner();
+  }
+
+  evaluateMultiplayerWinner() {
+    const outcomeEl = document.getElementById('multiplayer-outcome');
+    if (!outcomeEl) return;
+    
+    if (this.oppFinished && this.oppFinalStats) {
+      const myScore = this.score;
+      const oppScore = this.oppFinalStats.score;
+      
+      const oppFinScore = document.getElementById('opp-final-score');
+      const oppFinAcc = document.getElementById('opp-final-acc');
+      if (oppFinScore) oppFinScore.innerText = oppScore.toLocaleString('en-US');
+      if (oppFinAcc) oppFinAcc.innerText = this.oppFinalStats.acc;
+      
+      if (myScore > oppScore) {
+        outcomeEl.innerText = "🏆 YOU WON!";
+        outcomeEl.style.color = "#d946ef";
+      } else if (myScore < oppScore) {
+        outcomeEl.innerText = "💀 YOU LOST!";
+        outcomeEl.style.color = "#ff5252";
+      } else {
+        outcomeEl.innerText = "🤝 IT'S A TIE!";
+        outcomeEl.style.color = "#ffffff";
+      }
+    } else {
+      outcomeEl.innerText = "Waiting for Opponent...";
+      outcomeEl.style.color = "#718096";
+    }
+  }
+
+  cleanUpMultiplayer() {
+    if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
+    this.multiplayerInterval = null;
+    
+    if (this.peerConn) {
+      try { this.peerConn.close(); } catch(e) {}
+      this.peerConn = null;
+    }
+    if (this.peer) {
+      try { this.peer.destroy(); } catch(e) {}
+      this.peer = null;
+    }
+    
+    if (this.lobbyCode && this.multiplayerRole === 'host') {
+      this.removeLobbyFromPublic(this.lobbyCode);
+    }
+    
+    this.isMultiplayer = false;
+    this.lobbyCode = null;
+    this.multiplayerRole = null;
+    this.oppFinished = false;
+    this.oppFinalStats = null;
+    
+    const joinBtn = document.getElementById('join-lobby-btn');
+    if (joinBtn) {
+      joinBtn.innerText = "Join Lobby";
+      joinBtn.disabled = false;
+    }
+  }
+  
+  async removeLobbyFromPublic(code) {
+    try {
+      const lobbies = await this.getActiveLobbies();
+      const updated = lobbies.filter(l => l.code !== code);
+      await this.saveActiveLobbies(updated);
+    } catch(e) {}
   }
 }
 

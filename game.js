@@ -130,6 +130,7 @@ class GameEngine {
     this.oppFinished = false;
     this.pc = null;
     this.dataChannel = null;
+    this.eventSource = null;
 
     this.clickBuffers = { creamy: null, clacky: null, custom: null };
     this.initEventListeners();
@@ -1747,7 +1748,22 @@ class GameEngine {
       this.pc = new RTCPeerConnection({
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
         ]
       });
 
@@ -1759,13 +1775,13 @@ class GameEngine {
 
       document.getElementById('host-status-text').innerText = "Gathering network routes...";
       await new Promise((resolve) => {
-        if (this.pc.iceGatheringState === 'complete') {
-          resolve();
-        } else {
-          this.pc.onicecandidate = (e) => {
-            if (!e.candidate) resolve();
-          };
-        }
+        const timeout = setTimeout(resolve, 1500);
+        this.pc.onicecandidate = (e) => {
+          if (!e.candidate) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        };
       });
 
       await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, {
@@ -1799,26 +1815,27 @@ class GameEngine {
 
       document.getElementById('host-status-text').innerText = "Lobby open. Waiting for opponent...";
 
-      if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
-      this.multiplayerInterval = setInterval(async () => {
+      if (this.eventSource) this.eventSource.close();
+      this.eventSource = new EventSource(`https://ntfy.sh/soundspace-lobby-${code}/sse`);
+      
+      this.eventSource.onmessage = async (e) => {
         try {
-          const res = await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/answer_${code}`);
-          if (!res.ok) return;
-          const text = await res.text();
-          if (!text) return;
-          
-          clearInterval(this.multiplayerInterval);
-          this.multiplayerInterval = null;
-
-          const answer = JSON.parse(text);
-          await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
-          
-          fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, { method: 'DELETE' }).catch(()=>{});
-          fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/answer_${code}`, { method: 'DELETE' }).catch(()=>{});
-        } catch (e) {
-          console.error("Error polling for answer:", e);
+          const msg = JSON.parse(e.data);
+          if (msg.event === 'message') {
+            const payload = JSON.parse(msg.message);
+            if (payload.type === 'answer') {
+              console.log("Received answer description via ntfy.sh SSE.");
+              this.eventSource.close();
+              this.eventSource = null;
+              
+              await this.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+              fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/offer_${code}`, { method: 'DELETE' }).catch(()=>{});
+            }
+          }
+        } catch(err) {
+          console.error("SSE parse error:", err);
         }
-      }, 1000);
+      };
 
     } catch (err) {
       console.error(err);
@@ -1863,7 +1880,22 @@ class GameEngine {
       this.pc = new RTCPeerConnection({
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+          }
         ]
       });
 
@@ -1878,18 +1910,21 @@ class GameEngine {
       await this.pc.setLocalDescription(answer);
 
       await new Promise((resolve) => {
-        if (this.pc.iceGatheringState === 'complete') {
-          resolve();
-        } else {
-          this.pc.onicecandidate = (e) => {
-            if (!e.candidate) resolve();
-          };
-        }
+        const timeout = setTimeout(resolve, 1500);
+        this.pc.onicecandidate = (e) => {
+          if (!e.candidate) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        };
       });
 
-      await fetch(`https://kvdb.io/ss_rhythm_lobbies_v1/answer_${code}`, {
+      await fetch(`https://ntfy.sh/soundspace-lobby-${code}`, {
         method: 'POST',
-        body: JSON.stringify(this.pc.localDescription)
+        body: JSON.stringify({
+          type: 'answer',
+          sdp: this.pc.localDescription
+        })
       });
 
     } catch (err) {
@@ -2058,6 +2093,10 @@ class GameEngine {
     if (this.multiplayerInterval) clearInterval(this.multiplayerInterval);
     this.multiplayerInterval = null;
     
+    if (this.eventSource) {
+      try { this.eventSource.close(); } catch(e) {}
+      this.eventSource = null;
+    }
     if (this.dataChannel) {
       try { this.dataChannel.close(); } catch(e) {}
       this.dataChannel = null;

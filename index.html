@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sound Space HTML - Neon Rhythm Game</title>
+  <meta name="description" content="A browser-based Sound Space rhythm game clone. Play YouTube music or upload local MP3s and hit squares flying in 3D in sync with the beat.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Game Container -->
+  <div id="game-container">
+    <!-- Hidden container for the YouTube Player -->
+    <div id="yt-player-container">
+      <div id="yt-player"></div>
+    </div>
+
+    <!-- Main canvas where the game is drawn -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- Subtitle container for timed song lyrics -->
+    <div id="lyrics-display" class="lyrics-subtitle hidden"></div>
+
+    <!-- Vulnus-Style Gameplay HUD Overlay -->
+    <div id="gameplay-hud" class="hidden">
+      <!-- Top Center Progress -->
+      <div id="vulnus-header">
+        <div id="song-name-display">Artist - Title</div>
+        <div id="song-time-display">0:00 / 0:00</div>
+        <div id="progress-container">
+          <div id="progress-bar-fill"></div>
+        </div>
+        <div id="multiplayer-vs-panel" class="hidden">
+          <span>YOU: <b id="vs-my-score">0</b> (<span id="vs-my-acc">100.00%</span>)</span>
+          <span class="vs-divider">VS</span>
+          <span>OPPONENT: <b id="vs-opp-score">0</b> (<span id="vs-opp-acc">100.00%</span>)</span>
+        </div>
+      </div>
+
+      <!-- Left Sidebar HUD -->
+      <div id="vulnus-left-sidebar">
+        <div class="combo-circle-container">
+          <div class="combo-circle">
+            <span id="combo-display">0x</span>
+          </div>
+        </div>
+        
+        <div class="vulnus-hud-item">
+          <span class="vulnus-label">PAUSES</span>
+          <span id="pauses-display" class="vulnus-value">0</span>
+        </div>
+        
+        <div class="vulnus-divider">--</div>
+        
+        <div class="vulnus-hud-item">
+          <span class="vulnus-label">ACCURACY</span>
+          <span id="accuracy-display" class="vulnus-value">-</span>
+        </div>
+        
+        <div class="vulnus-bottom-line-left"></div>
+      </div>
+
+      <!-- Right Sidebar HUD -->
+      <div id="vulnus-right-sidebar">
+        <div class="vulnus-hud-item score-item">
+          <span id="score-display" class="vulnus-value-large">0</span>
+        </div>
+        
+        <div class="vulnus-hud-item">
+          <span class="vulnus-label">MISSES</span>
+          <span id="misses-display" class="vulnus-value">0</span>
+        </div>
+        
+        <div class="vulnus-divider-gap"></div>
+        
+        <div class="vulnus-hud-item">
+          <span class="vulnus-label">NOTES</span>
+          <span id="notes-ratio-display" class="vulnus-value">0/0</span>
+        </div>
+      </div>
+
+      <!-- Background Large Combo Counter -->
+      <div id="bg-combo-counter">0</div>
+      
+      <!-- Bottom Line Center -->
+      <div class="vulnus-bottom-line-center"></div>
+      
+      <!-- Keep max-combo-display in DOM for script updates, hidden visually -->
+      <span id="max-combo-display" class="hidden">0</span>
+    </div>
+
+    <!-- Center Message HUD for Hit Rating (PERFECT/GOOD/MISS) -->
+    <div id="hit-rating-overlay"></div>
+
+    <!-- Start Dashboard / Menu Overlay (Glassmorphism design) -->
+    <div id="menu-overlay" class="overlay active">
+      <div class="menu-card glass">
+        <h1 class="logo-text">SOUND <span class="neon-magenta">SPACE</span></h1>
+        <p class="subtitle">A cursor-tracking 3D rhythm game. Move your mouse to hover notes.</p>
+
+        <!-- Selection Panel for Audio Input -->
+        <div class="input-tabs">
+          <button id="tab-yt" class="tab-btn active">YouTube Music</button>
+          <button id="tab-local" class="tab-btn">Local Audio File</button>
+          <button id="tab-multi" class="tab-btn">1v1 Multiplayer</button>
+        </div>
+
+        <div class="tab-content" id="content-yt">
+          <div class="form-group">
+            <label for="yt-url-input">YouTube Video URL</label>
+            <input type="text" id="yt-url-input" placeholder="e.g. https://www.youtube.com/watch?v=UmXvD5IuH1U" value="https://music.youtube.com/watch?v=a8XAOMeWdqY">
+            <span class="help-text">Any YouTube link with music works. A deterministic beatmap is generated!</span>
+          </div>
+        </div>
+
+        <div class="tab-content hidden" id="content-local">
+          <div class="form-group">
+            <label for="audio-file-input" class="file-upload-label glass">
+              <span class="upload-icon">🎵</span>
+              <span id="upload-status-text">Choose audio file (MP3, WAV, M4A)</span>
+              <input type="file" id="audio-file-input" accept="audio/*">
+            </label>
+            <span class="help-text">Real-time beat-detection analysis will run on your file!</span>
+          </div>
+        </div>
+
+        <div class="tab-content hidden" id="content-multi">
+          <div class="multi-setup-grid">
+            <div class="multi-setup-card">
+              <h3>Host Match</h3>
+              <p class="help-text">Host a match using your current settings.</p>
+              <button id="host-lobby-btn" class="action-btn neon-btn" style="width: 100%; padding: 10px; margin-top: 10px;">Host a Lobby</button>
+              
+              <div id="host-status-container" class="hidden" style="margin-top: 15px;">
+                <div class="lobby-code-display">Room Code: <span id="host-code-val" class="neon-magenta">----</span></div>
+                <div id="host-status-text" class="help-text" style="margin: 8px 0;">Waiting for opponent...</div>
+                <button id="start-multi-btn" class="action-btn neon-btn" style="width: 100%; padding: 10px;">Start Match</button>
+              </div>
+            </div>
+            
+            <div class="multi-setup-card">
+              <h3>Join Match</h3>
+              <p class="help-text">Enter code to join a friend's lobby.</p>
+              <div class="form-group" style="margin-top: 10px; margin-bottom: 10px;">
+                <input type="text" id="join-code-input" placeholder="Lobby Code (e.g. 1234)" style="width: 100%; text-align: center; font-size: 16px; font-weight: bold; padding: 10px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 6px; color: white;">
+              </div>
+              <button id="join-lobby-btn" class="action-btn secondary-btn" style="width: 100%; padding: 10px;">Join Lobby</button>
+            </div>
+          </div>
+          
+          <div class="active-lobbies-section" style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 15px; text-align: left;">
+            <h3 style="font-size: 14px; margin-bottom: 10px; color: var(--accent-color);">Active Lobbies</h3>
+            <div id="lobbies-list" class="challenges-grid">
+              <span class="help-text" style="font-size: 12px; color: #718096;">No active lobbies. Host one!</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Game Modifiers & Parameters -->
+        <div class="settings-grid">
+          <div class="form-group">
+            <label for="grid-size-select">Grid Size</label>
+            <select id="grid-size-select">
+              <option value="3">3 x 3 Grid (Standard)</option>
+              <option value="4">4 x 4 Grid (Expert)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="approach-rate-input">Speed (Approach Rate)</label>
+            <div class="slider-container">
+              <input type="range" id="approach-rate-input" min="300" max="1500" step="50" value="800">
+              <span id="ar-val">800ms</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="cursor-size-input">Cursor Hitbox Radius</label>
+            <div class="slider-container">
+              <input type="range" id="cursor-size-input" min="15" max="50" step="5" value="30">
+              <span id="cursor-val">30px</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="sensitivity-input">Mouse Sensitivity</label>
+            <div class="slider-container">
+              <input type="range" id="sensitivity-input" min="0.5" max="3.0" step="0.1" value="1.0">
+              <span id="sens-val">1.0x</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="difficulty-input">Beat Density / Difficulty</label>
+            <select id="difficulty-input">
+              <option value="easy">Easy (Low Density)</option>
+              <option value="medium" selected>Medium (Standard)</option>
+              <option value="hard">Hard (High Density)</option>
+              <option value="brrr">BRRR (Insane Density)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="cursor-color-input">Cursor Color</label>
+            <input type="color" id="cursor-color-input" value="#ffffff" class="color-picker-input">
+          </div>
+
+          <div class="form-group">
+            <label for="offset-input">Song Start Offset (Vocal Sync)</label>
+            <div class="slider-container">
+              <input type="range" id="offset-input" min="-10000" max="10000" step="50" value="0">
+              <span id="offset-val">0ms</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="audio-focus-select">Audio Sync Focus</label>
+            <select id="audio-focus-select">
+              <option value="beat">Bass & Beats (Rhythm)</option>
+              <option value="vocal" selected>Vocals & Melody (DSP)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="cursor-image-input">Cursor Image (Optional)</label>
+            <label for="cursor-image-input" class="custom-file-btn">
+              <span id="cursor-image-status">Use Custom Image...</span>
+              <input type="file" id="cursor-image-input" accept="image/*" style="display: none;">
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label for="custom-click-input">Custom Click Sound (Optional)</label>
+            <label for="custom-click-input" class="custom-file-btn">
+              <span id="custom-click-status">Use Custom MP3...</span>
+              <input type="file" id="custom-click-input" accept="audio/mp3,audio/mpeg,audio/*" style="display: none;">
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label for="theme-select">Visual Theme</label>
+            <select id="theme-select">
+              <option value="dark" selected>Sleek Slate (Dark)</option>
+              <option value="deep-dark">Darkkkkkk (Deep Black)</option>
+              <option value="pink-purple">Pink & Purple</option>
+              <option value="rainbow">Rainbow (Animated)</option>
+              <option value="custom">Custom Theme...</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="click-sound-select">Hit Click Sound</label>
+            <select id="click-sound-select">
+              <option value="normal" selected>Normal (Crisp Woodblock)</option>
+              <option value="creamy">Creamy (Warm Keyboard Thock)</option>
+              <option value="clacky">Clacky (Sharp Key Clack)</option>
+              <option value="custom">Custom (Uploaded MP3)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Custom Theme Color Controls (Visible only when 'custom' theme is selected) -->
+        <div id="custom-theme-controls" class="settings-grid hidden">
+          <div class="form-group">
+            <label for="custom-bg-color">Background Color</label>
+            <input type="color" id="custom-bg-color" value="#0e0e12" class="color-picker-input">
+          </div>
+          <div class="form-group">
+            <label for="custom-card-color">Card Background</label>
+            <input type="color" id="custom-card-color" value="#16161f" class="color-picker-input">
+          </div>
+          <div class="form-group">
+            <label for="custom-accent-color">Accent Color</label>
+            <input type="color" id="custom-accent-color" value="#ffffff" class="color-picker-input">
+          </div>
+        </div>
+
+        <!-- Challenges Panel -->
+        <div class="challenges-section">
+          <h2 class="section-title">🏆 EXPERT CHALLENGE</h2>
+          <div class="challenges-grid">
+            <div class="challenge-card" data-youtube="https://www.youtube.com/watch?v=Qskm9MTz2V4" data-difficulty="brrr" data-grid="4" data-ar="550">
+              <div class="challenge-info">
+                <span class="challenge-name">Rush E</span>
+                <span class="challenge-artist">Sheet Music Boss</span>
+              </div>
+              <span class="challenge-badge brrr">BRRR</span>
+            </div>
+          </div>
+        </div>
+
+        <button id="start-game-btn" class="action-btn neon-btn">LOAD & START GAME</button>
+      </div>
+    </div>
+
+    <!-- Loading Screen Overlay -->
+    <div id="loading-overlay" class="overlay hidden">
+      <div class="loading-container text-center">
+        <div class="neon-spinner"></div>
+        <h2 id="loading-message">ANALYZING SONG BEATS...</h2>
+        <p class="sub-loading">Preparing the rhythm matrix...</p>
+      </div>
+    </div>
+
+    <!-- Pause/Game Over overlays -->
+    <div id="pause-overlay" class="overlay hidden">
+      <div class="menu-card glass text-center">
+        <h2 class="neon-magenta">GAME PAUSED</h2>
+        <p>Press <kbd>Space</kbd> or click below to resume.</p>
+        <button id="resume-btn" class="action-btn secondary-btn">Resume</button>
+        <button id="restart-btn" class="action-btn secondary-btn">Restart</button>
+        <button id="quit-btn" class="action-btn secondary-btn">Quit to Menu</button>
+      </div>
+    </div>
+
+    <!-- Game Finished Overlay -->
+    <div id="finish-overlay" class="overlay hidden">
+      <div class="menu-card glass text-center">
+        <h1 class="neon-green">SONG COMPLETE</h1>
+        <div class="stats-report">
+          <div class="stat-row">
+            <span>Accuracy</span>
+            <span id="final-accuracy" class="neon-blue">0.00%</span>
+          </div>
+          <div class="stat-row">
+            <span>Score</span>
+            <span id="final-score">0</span>
+          </div>
+          <div class="stat-row">
+            <span>Max Combo</span>
+            <span id="final-combo" class="neon-magenta">0</span>
+          </div>
+          <div class="stat-row">
+            <span>Hits (Perfect / Good / Okay)</span>
+            <span id="final-hits">0 / 0 / 0</span>
+          </div>
+          <div class="stat-row">
+            <span>Misses</span>
+            <span id="final-misses" class="text-red">0</span>
+          </div>
+        </div>
+        
+        <!-- Multiplayer Summary Panel -->
+        <div id="multiplayer-result-panel" class="hidden" style="margin-top: 15px; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 8px; width: 100%; max-width: 400px; margin: 15px auto;">
+          <h2 id="multiplayer-outcome" class="neon-magenta" style="font-size: 24px; font-weight: 800; letter-spacing: 1px;">YOU WON!</h2>
+          <div class="stats-report" style="border: none; padding: 0; margin: 10px auto 0 auto; background: none;">
+            <div class="stat-row">
+              <span>Your Score</span>
+              <span id="my-final-score" style="color: var(--accent-color);">0</span>
+            </div>
+            <div class="stat-row">
+              <span>Opponent Score</span>
+              <span id="opp-final-score">0</span>
+            </div>
+            <div class="stat-row">
+              <span>Opponent Accuracy</span>
+              <span id="opp-final-acc">0.00%</span>
+            </div>
+          </div>
+        </div>
+        <button id="play-again-btn" class="action-btn neon-btn">Play Again</button>
+        <button id="finish-quit-btn" class="action-btn secondary-btn">Main Menu</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="audio.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
